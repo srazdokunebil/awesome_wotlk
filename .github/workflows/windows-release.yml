@@ -1,0 +1,38 @@
+name: CMake Windows Win32 Release
+on:
+  release:
+    types: [published]
+env:
+  BUILD_TYPE: Release
+jobs:
+  build-windows-win32-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Configure and build
+        run: |
+          $buildDir = "${{ github.workspace }}\build"
+          cmake -S "${{ github.workspace }}" -B $buildDir -G "Visual Studio 17 2022" -A Win32 -T host=x64
+          cmake --build $buildDir --config ${{ env.BUILD_TYPE }} -- /m
+      - name: Package release
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          $staging = "${{ github.workspace }}\staging"
+
+          New-Item -ItemType Directory -Force -Path "$staging\Interface\AddOns" | Out-Null
+
+          Copy-Item "${{ github.workspace }}\addons\AwesomeCVar" "$staging\Interface\AddOns\AwesomeCVar" -Recurse
+          Copy-Item "${{ github.workspace }}\addons\Flash" "$staging\Interface\AddOns\Flash" -Recurse
+
+          Copy-Item "${{ github.workspace }}\build\Release\AwesomeWotlkPatch.exe" "$staging\"
+          Copy-Item "${{ github.workspace }}\build\Release\AwesomeWotlkLib.dll" "$staging\"
+          Copy-Item "${{ github.workspace }}\deps\skia\skia.dll" "$staging\"
+
+          Compress-Archive -Path "$staging\*" -DestinationPath "${{ github.workspace }}\AwesomeWotLK_$tag.zip" -Force
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win32-release
+          path: AwesomeWotLK_*.zip
