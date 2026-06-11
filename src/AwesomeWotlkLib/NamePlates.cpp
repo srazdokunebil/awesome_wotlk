@@ -43,6 +43,11 @@ namespace {
     CVar* s_cvar_nameplateClampTop;
     CVar* s_cvar_nameplateClampTopOffset;
 
+    // When true, nameplate frames are kept alive (m_isShown=1) but rendered at alpha 0.
+    // Allows C_NamePlate API and iTargetingFrames to function with nameplates visually hidden.
+    bool g_hidePlatesVisually = false;
+    CVar* s_cvar_nameplateShowITF;
+
     enum EStackingMode : int8_t {
         S_DISABLED = 0,
         S_ALL = 1,
@@ -565,8 +570,8 @@ namespace {
                     const int index = w * 64 + bit;
                     Entry* e = &byId[index];
                     const CGUnit_C* unit = ObjectMgr::Get<CGUnit_C>(e->ptr->m_ownerGuid, TYPEMASK_UNIT);
-                    if (unit && unit->m_nameplate) {
-                        e->guid = unit->m_nameplate->m_ownerGuid;
+                    if (unit && (unit->m_nameplate || g_hidePlatesVisually)) {
+                        e->guid = unit->m_nameplate ? unit->m_nameplate->m_ownerGuid : unit->GetValue<guid_t>(0);
                         Lua::lua_pushframe(L, e->ptr);
                         Lua::lua_pushstring(L, tokenCache[index]);
                         Lua::lua_setfield(L, -2, "unit");
@@ -744,15 +749,12 @@ namespace {
             auto* e = g_entries.getEntry(id);
             if (child->m_isShown == 0) {
                 if (e && e->hasState(Entry::IEState::IS_ACTIVE)) {
-                    // Only fire UNIT_REMOVED if the unit is truly gone from the world.
-                    // If the unit still exists (nameplate just visually toggled off),
-                    // suppress the event so addons like iTargetingFrames keep their frames.
+                    // Only fire UNIT_REMOVED if unit is truly gone, not just visually hidden
                     CGUnit_C* unit = ObjectMgr::Get<CGUnit_C>(e->guid, TYPEMASK_UNIT);
-                    if (!unit || !unit->m_nameplate) {
+                    if (!g_hidePlatesVisually && (!unit || !unit->m_nameplate)) {
                         FrameScript::FireEvent(NAME_PLATE_UNIT_REMOVED, "%s", g_entries.getToken(id));
                         e->setState(Entry::IEState::IS_ACTIVE, false);
                     }
-                    // else: unit still alive, nameplate just hidden — keep IS_ACTIVE, no event
                 }
             }
             else {
@@ -791,6 +793,22 @@ namespace {
             });
 
         g_entries.flushRemoved(); // bulk flush now to ensure callbacks recieve a complete gapless snapshot of the previous frame
+
+        // If visual-only hide is active, re-show any plates the client hid and zero their alpha
+        if (g_hidePlatesVisually) {
+            pThis->EnumerateChildren([&](CSimpleFrame* child) {
+                auto* plate = reinterpret_cast<CGNamePlate*>(child);
+                const int id = plate->GetPlateId();
+                auto* e = g_entries.getEntry(id);
+                if (e && e->hasState(Entry::IEState::IS_ACTIVE)) {
+                    if (child->m_isShown == 0) {
+                        child->m_isShown = 1;
+                    }
+                    child->SetAlpha(0);
+                    plate->m_alpha = 0.0f;
+                }
+            });
+        }
         const auto& buf = g_entries.get();
         if (buf.empty()) {
             g_entries.clearPending();
@@ -945,6 +963,8 @@ namespace {
 
     uint8_t __fastcall CSimpleFrame__SetFrameAlpha_siteWrapper(CGUnit_C* unit) {
         if (!unit || !unit->m_nameplate) return 255;
+        // Visual-only hide: keep frame alive for API but render invisible
+        if (g_hidePlatesVisually) return 0;
 
         bool isTargetOrMouseOver = *g_lockedTarget ? unit->GetEntry<UnitEntry>()->m_guid == *g_lockedTarget : unit->m_nameplate == *g_nameplateFocus;
         uint8_t targetAlpha = (*g_lockedTarget) ? (isTargetOrMouseOver ? 255 : static_cast<uint8_t>(255 * g_nonTargetAlpha)) : 255;
@@ -1203,6 +1223,28 @@ namespace {
         if (CGWorldFrame* wf = CGWorldFrame::GetWorldFrame()) wf->m_renderDirtyFlags |= 1;
         return result;
     }
+
+    // Controls whether nameplates are visually hidden while keeping the C_NamePlate
+    // API and iTargetingFrames functional. Set nameplateShowITF=0 to hide plates visually.
+    int CVarHandler_NameplateShowITF(CVar* cvar, const char*, const char* value, void*) {
+        int f = 1;
+        const int result = cvar->Sync(value, &f, 0, 1, "%d");
+        const bool wasHidden = g_hidePlatesVisually;
+        g_hidePlatesVisually = (f == 0);
+        // When re-enabling visual nameplates, reset all active plate alphas so
+        // the client's ramp-up system picks them up correctly
+        if (wasHidden && !g_hidePlatesVisually) {
+            const auto& buf = g_entries.get();
+            for (const auto& e : buf) {
+                if (e->hasState(Entry::IEState::IS_ACTIVE) && e->ptr) {
+                    e->ptr->m_alpha = 0.001f; // non-zero triggers client ramp-up
+                    e->ptr->SetAlpha(1);      // restore frame alpha
+                }
+            }
+        }
+        if (CGWorldFrame* wf = CGWorldFrame::GetWorldFrame()) wf->m_renderDirtyFlags |= 1;
+        return result;
+    }
 }
 
 guid_t NamePlates::GetTokenGuid(int id) { return g_entries.getTokenGuid(id); }
@@ -1240,6 +1282,7 @@ void NamePlates::initialize() {
     Hooks::FrameXML::registerCVar(&s_cvar_nameplateClampTop, "nameplateClampTop", nullptr, "0", CVarHandler_NameplateClampTop);
     Hooks::FrameXML::registerCVar(&s_cvar_nameplateClampTopOffset, "nameplateClampTopOffset", nullptr, "0.1", CVarHandler_NameplateClampTopOffset);
     Hooks::FrameXML::registerCVar(&s_cvar_nameplateStacking, "nameplateStacking", nullptr, "0", CVarHandler_NameplateStacking);
+    Hooks::FrameXML::registerCVar(&s_cvar_nameplateShowITF, "nameplateShowITF", nullptr, "1", CVarHandler_NameplateShowITF);
 
     Hooks::Detour(&CSimpleFrame__SetFrameAlpha_site, CSimpleFrame__SetFrameAlpha_siteHk);
 
