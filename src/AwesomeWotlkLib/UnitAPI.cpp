@@ -125,6 +125,124 @@ namespace {
         return 0;
     }
 
+    int lua_UnitInLOS(lua_State* L) {
+        const char* targetToken = Lua::luaL_checkstring(L, 1);
+        guid_t targetGuid = ObjectMgr::GetGuidByUnitID(targetToken);
+        if (!targetGuid) return 0;
+
+        CGUnit_C* target = ObjectMgr::Get<CGUnit_C>(targetGuid, TYPEMASK_UNIT);
+        if (!target) return 0;
+
+        CGPlayer_C* player = ObjectMgr::Get<CGPlayer_C>(ObjectMgr::GetPlayerGuid(), TYPEMASK_PLAYER);
+        if (!player) return 0;
+
+        C3Vector playerPos, targetPos;
+        player->GetPosition(playerPos);
+        target->GetPosition(targetPos);
+
+        // Offset positions to approximate eye level for both units
+        playerPos.Z += player->m_unitHeight * 0.5f;
+        targetPos.Z += target->m_unitHeight * 0.5f;
+
+        constexpr uint32_t LOS_FLAGS = 0x00100110;
+        C3Vector hitPos{};
+        float hitDist = 1.0f; // Must be initialised to 1.0f per TraceLine contract
+
+        bool blocked = CGGameUI::TraceLine(playerPos, targetPos, LOS_FLAGS, hitPos, hitDist);
+
+        // TraceLine returns true when the ray HIT something (LOS blocked)
+        if (!blocked) Lua::lua_pushnumber(L, 1);
+        return blocked ? 0 : 1;
+    }
+
+    int lua_UnitPosition(lua_State* L) {
+        const char* token = Lua::luaL_checkstring(L, 1);
+        guid_t guid = ObjectMgr::GetGuidByUnitID(token);
+        if (!guid) return 0;
+
+        CGUnit_C* unit = ObjectMgr::Get<CGUnit_C>(guid, TYPEMASK_UNIT);
+        if (!unit) return 0;
+
+        C3Vector pos;
+        unit->GetPosition(pos);
+
+        Lua::lua_pushnumber(L, pos.X);
+        Lua::lua_pushnumber(L, pos.Y);
+        Lua::lua_pushnumber(L, pos.Z);
+        return 3;
+    }
+
+    int lua_UnitExistsGUID(lua_State* L) {
+        const char* guidStr = Lua::luaL_checkstring(L, 1);
+        guid_t guid = ObjectMgr::HexString2Guid(guidStr);
+        if (!guid) return 0;
+
+        CGUnit_C* unit = ObjectMgr::Get<CGUnit_C>(guid, TYPEMASK_UNIT);
+        if (!unit) return 0;
+
+        Lua::lua_pushnumber(L, 1);
+        return 1;
+    }
+
+    int lua_TargetUnitByGUID(lua_State* L) {
+        const char* guidStr = Lua::luaL_checkstring(L, 1);
+        guid_t guid = ObjectMgr::HexString2Guid(guidStr);
+        if (!guid) return 0;
+
+        CGUnit_C* unit = ObjectMgr::Get<CGUnit_C>(guid, TYPEMASK_UNIT);
+        if (!unit) return 0;
+
+        CGGameUI::TargetFn(guid);
+        return 0;
+    }
+
+    int lua_UnitGUIDByName(lua_State* L) {
+        const char* name = Lua::luaL_checkstring(L, 1);
+        if (!name || !name[0]) return 0;
+
+        guid_t result = 0;
+        ObjectMgr::EnumObjects([&](guid_t guid) -> bool {
+            CGUnit_C* unit = ObjectMgr::Get<CGUnit_C>(guid, TYPEMASK_UNIT);
+            if (!unit) return true;
+            const char* unitName = unit->GetObjectName();
+            if (unitName && strcmp(unitName, name) == 0) {
+                result = guid;
+                return false; // stop enumeration
+            }
+            return true;
+        });
+
+        if (!result) return 0;
+
+        char guidStr[32];
+        snprintf(guidStr, sizeof(guidStr), "0x%016llX", result);
+        Lua::lua_pushstring(L, guidStr);
+        return 1;
+    }
+
+    // Tracks last LOS update time
+    static uint32_t s_lastLOSUpdate = 0;
+    constexpr uint32_t LOS_UPDATE_INTERVAL_MS = 500;
+
+    void OnUpdate_LOSCache() {
+        uint32_t now = GetTickCount();
+        if (now - s_lastLOSUpdate < LOS_UPDATE_INTERVAL_MS) return;
+        s_lastLOSUpdate = now;
+
+        lua_State* L = Lua::GetLuaState();
+        if (!L) return;
+
+        Lua::lua_getglobal(L, "Tic");
+        if (!Lua::lua_istable(L, -1)) { Lua::lua_pop(L, 1); return; }
+
+        Lua::lua_getfield(L, -1, "Heartbeat");
+        if (!Lua::lua_isfunction(L, -1)) { Lua::lua_pop(L, 2); return; }
+
+        Lua::lua_pushvalue(L, -2); // push Tic as self
+        Lua::lua_pcall(L, 1, 0, 0);
+        Lua::lua_pop(L, 1); // pop Tic table
+    }
+
     int lua_openunitlib(lua_State* L) {
         Lua::luaL_Reg funcs[] = {
             { "UnitIsControlled", lua_UnitIsControlled },
@@ -133,11 +251,17 @@ namespace {
             { "UnitOccupations", lua_UnitOccupations },
             { "UnitOwner", lua_UnitOwner },
             { "UnitTokenFromGUID", lua_UnitTokenFromGUID },
+            { "UnitInLOS", lua_UnitInLOS },
+            { "UnitPosition", lua_UnitPosition },
+            { "UnitExistsGUID", lua_UnitExistsGUID },
+            { "TargetUnitByGUID", lua_TargetUnitByGUID },
+            { "UnitGUIDByName", lua_UnitGUIDByName },
         };
         for (auto& [name, func] : funcs) {
             Lua::lua_pushcfunction(L, func);
             Lua::lua_setglobal(L, name);
         }
+        Hooks::FrameScript::registerOnUpdate(OnUpdate_LOSCache);
         return 0;
     }
 }
