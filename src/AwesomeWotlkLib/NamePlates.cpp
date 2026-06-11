@@ -744,8 +744,15 @@ namespace {
             auto* e = g_entries.getEntry(id);
             if (child->m_isShown == 0) {
                 if (e && e->hasState(Entry::IEState::IS_ACTIVE)) {
-                    FrameScript::FireEvent(NAME_PLATE_UNIT_REMOVED, "%s", g_entries.getToken(id));
-                    e->setState(Entry::IEState::IS_ACTIVE, false);
+                    // Only fire UNIT_REMOVED if the unit is truly gone from the world.
+                    // If the unit still exists (nameplate just visually toggled off),
+                    // suppress the event so addons like iTargetingFrames keep their frames.
+                    CGUnit_C* unit = ObjectMgr::Get<CGUnit_C>(e->guid, TYPEMASK_UNIT);
+                    if (!unit || !unit->m_nameplate) {
+                        FrameScript::FireEvent(NAME_PLATE_UNIT_REMOVED, "%s", g_entries.getToken(id));
+                        e->setState(Entry::IEState::IS_ACTIVE, false);
+                    }
+                    // else: unit still alive, nameplate just hidden — keep IS_ACTIVE, no event
                 }
             }
             else {
