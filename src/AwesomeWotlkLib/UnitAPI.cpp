@@ -3,6 +3,8 @@
 #include "Hooks.h"
 #include "NamePlates.h"
 
+#include <cmath>
+
 namespace {
     bool checkToken(lua_State* L, const char* token, guid_t guid) {
         if (const guid_t guid_t = ObjectMgr::GetGuidByUnitID(token); guid_t == guid) {
@@ -172,6 +174,91 @@ namespace {
         return 3;
     }
 
+    int lua_UnitFacing(lua_State* L) {
+        const char* token = Lua::luaL_checkstring(L, 1);
+        guid_t guid = ObjectMgr::GetGuidByUnitID(token);
+        if (!guid) return 0;
+
+        CGUnit_C* unit = ObjectMgr::Get<CGUnit_C>(guid, TYPEMASK_UNIT);
+        if (!unit) return 0;
+
+        float facing = unit->GetFacing();
+        if (!std::isfinite(facing)) return 0;
+
+        // Match the documented UnitFacing contract: counterclockwise radians,
+        // normalized to the [0, 2*pi) interval.
+        constexpr float TWO_PI = 6.28318530717958647692f;
+        facing = std::fmod(facing, TWO_PI);
+        if (facing < 0.0f) facing += TWO_PI;
+
+        Lua::lua_pushnumber(L, facing);
+        return 1;
+    }
+
+    int lua_AmBehind(lua_State* L) {
+        const char* token = Lua::luaL_checkstring(L, 1);
+
+        // AmBehind is intentionally tied to the player's current target.
+        // A different token may be supplied, but it must resolve to the same
+        // GUID as the current target.
+        guid_t currentTargetGuid = ObjectMgr::GetTargetGuid();
+        guid_t unitGuid = ObjectMgr::GetGuidByUnitID(token);
+        if (!currentTargetGuid || !unitGuid || unitGuid != currentTargetGuid) {
+            Lua::lua_pushboolean(L, false);
+            return 1;
+        }
+
+        CGPlayer_C* player = ObjectMgr::Get<CGPlayer_C>(
+            ObjectMgr::GetPlayerGuid(), TYPEMASK_PLAYER);
+        CGUnit_C* target = ObjectMgr::Get<CGUnit_C>(unitGuid, TYPEMASK_UNIT);
+        if (!player || !target) {
+            Lua::lua_pushboolean(L, false);
+            return 1;
+        }
+
+        C3Vector playerPos{}, targetPos{};
+        player->GetPosition(playerPos);
+        target->GetPosition(targetPos);
+
+        // Horizontal direction from the target's center to the player.
+        const float dx = playerPos.X - targetPos.X;
+        const float dy = playerPos.Y - targetPos.Y;
+        const float distanceSquared = dx * dx + dy * dy;
+
+        // At effectively identical horizontal coordinates, the rear arc is
+        // undefined. Return false rather than allowing floating-point noise
+        // to choose a side.
+        constexpr float MIN_DISTANCE_SQUARED = 0.000001f;
+        if (distanceSquared <= MIN_DISTANCE_SQUARED) {
+            Lua::lua_pushboolean(L, false);
+            return 1;
+        }
+
+        const float facing = target->GetFacing();
+        if (!std::isfinite(facing)) {
+            Lua::lua_pushboolean(L, false);
+            return 1;
+        }
+
+        const float inverseDistance = 1.0f / std::sqrt(distanceSquared);
+        const float targetToPlayerX = dx * inverseDistance;
+        const float targetToPlayerY = dy * inverseDistance;
+
+        // The client uses (cos(facing), sin(facing)) as the unit's forward
+        // vector. A negative dot product places the player in the target's
+        // rear 180-degree hemisphere, meaning the target faces away.
+        const float forwardX = std::cos(facing);
+        const float forwardY = std::sin(facing);
+        const float facingDot =
+            targetToPlayerX * forwardX + targetToPlayerY * forwardY;
+
+        // Keep the exact side boundary out of the rear arc and absorb tiny
+        // floating-point fluctuations around zero.
+        constexpr float REAR_ARC_EPSILON = 0.0001f;
+        Lua::lua_pushboolean(L, facingDot < -REAR_ARC_EPSILON);
+        return 1;
+    }
+
     int lua_UnitExistsGUID(lua_State* L) {
         const char* guidStr = Lua::luaL_checkstring(L, 1);
         guid_t guid = ObjectMgr::HexString2Guid(guidStr);
@@ -253,6 +340,8 @@ namespace {
             { "UnitTokenFromGUID", lua_UnitTokenFromGUID },
             { "UnitInLOS", lua_UnitInLOS },
             { "UnitPosition", lua_UnitPosition },
+            { "UnitFacing", lua_UnitFacing },
+            { "AmBehind", lua_AmBehind },
             { "UnitExistsGUID", lua_UnitExistsGUID },
             { "TargetUnitByGUID", lua_TargetUnitByGUID },
             { "UnitGUIDByName", lua_UnitGUIDByName },
