@@ -7,6 +7,7 @@ namespace {
     bool g_cursorKeywordActive = false;
     bool g_playerLocationKeywordActive = false;
     bool g_focusLocationKeywordActive = false;
+    bool g_targetLocationKeywordActive = false;
 
 	enum EObjHLMode : int8_t {
 		HL_DISABLED = 0,
@@ -292,12 +293,14 @@ namespace {
         bool is_cursor = iequals(parsed_target_view, "cursor");
         bool is_playerlocation = iequals(parsed_target_view, "playerlocation");
         bool is_focuslocation = iequals(parsed_target_view, "focuslocation");
+        bool is_targetlocation = iequals(parsed_target_view, "targetlocation");
 
-        if (!is_cursor && !is_playerlocation && !is_focuslocation) return result;
+        if (!is_cursor && !is_playerlocation && !is_focuslocation && !is_targetlocation) return result;
 
         if (is_cursor) g_cursorKeywordActive = true;
         else if (is_playerlocation) g_playerLocationKeywordActive = true;
         else if (is_focuslocation) g_focusLocationKeywordActive = true;
+        else if (is_targetlocation) g_targetLocationKeywordActive = true;
 
         std::string parsed_result = Lua::lua_tostring(L, 2);
         std::string orig_string = Lua::lua_tostring(L, 1);
@@ -335,6 +338,18 @@ namespace {
             g_focusLocationKeywordActive = false;
             return pThis->OnLayerTrackTerrain(a1);
         }
+        if (g_targetLocationKeywordActive) {
+            guid_t targetGuid = ObjectMgr::GetGuidByUnitID("target");
+            if (targetGuid) {
+                if (CGUnit_C* target = ObjectMgr::Get<CGUnit_C>(targetGuid, TYPEMASK_UNIT)) {
+                    C3Vector targetPos;
+                    target->GetPosition(targetPos);
+                    TerrainClick(targetPos.X, targetPos.Y, targetPos.Z);
+                }
+            }
+            g_targetLocationKeywordActive = false;
+            return pThis->OnLayerTrackTerrain(a1);
+        }
         if (g_cursorKeywordActive) {
             auto* coords = reinterpret_cast<float*>(a1);
             C3Vector cursorPos = {
@@ -357,6 +372,7 @@ namespace {
         g_cursorKeywordActive = false;
         g_playerLocationKeywordActive = false;
         g_focusLocationKeywordActive = false;
+        g_targetLocationKeywordActive = false;
     }
 
     void __declspec(naked) SpellCastResetHk() {
